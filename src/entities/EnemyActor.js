@@ -42,6 +42,13 @@ export class EnemyActor {
     this.tauntCooldown = 8.5;
     this.ravageVoCooldown = 0;
 
+    // Reusable scratch vectors (zero per-frame GC churn)
+    this._prevPos = new THREE.Vector3();
+    this._toPlayer = new THREE.Vector3();
+    this._dirToPlayer = new THREE.Vector3();
+    this._perp = new THREE.Vector3();
+    this._chestPos = new THREE.Vector3();
+
     if (!isBoss) {
       this.worldBarEl = this.hud.createEnemyWorldBar(this);
     }
@@ -169,18 +176,24 @@ export class EnemyActor {
   update(dt, { player, aiEnabled = true, canStartAttack = true, allies = null }) {
     if (this.dead) {
       this.deathTimer += dt;
-      this.rig.update(dt, { isDead: true });
+      // Stop running skeletal solver once death animation finishes settling
+      if (this.deathTimer < 2.0) {
+        this.rig.update(dt, { isDead: true });
+      }
       if (!this.isBoss && this.deathTimer > 2.2) {
         this.pos.y -= dt * 0.45;
       }
       return;
     }
     if (!this.active) {
-      this.rig.update(dt, { moveSpeed: 0 });
+      // Skip skeletal updates for distant inactive Boss until player approaches the temple stairs
+      if (!this.isBoss || (player && player.pos.z < -6.0)) {
+        this.rig.update(dt, { moveSpeed: 0 });
+      }
       return;
     }
 
-    const prevPos = this.pos.clone();
+    const prevPos = this._prevPos.copy(this.pos);
     // Slowly recover posture when not broken
     if (this.brokenTimer > 0) {
       this.brokenTimer -= dt;
@@ -201,10 +214,12 @@ export class EnemyActor {
       this.ravageVoCooldown -= dt;
     }
 
-    const toPlayer = new THREE.Vector3().subVectors(player.pos, this.pos);
+    const toPlayer = this._toPlayer.subVectors(player.pos, this.pos);
     toPlayer.y = 0;
     const dist = toPlayer.length();
-    const dirToPlayer = dist > 0.001 ? toPlayer.clone().divideScalar(dist) : new THREE.Vector3(0, 0, 1);
+    const dirToPlayer = dist > 0.001
+      ? this._dirToPlayer.copy(toPlayer).divideScalar(dist)
+      : this._dirToPlayer.set(0, 0, 1);
 
     let speed = 0;
     let combatPose = 'none';
@@ -230,7 +245,7 @@ export class EnemyActor {
         // Telegraph blade flash so player can read & Perfect Parry!
         if (!this.telegraphed && this.moveTimer >= m.telegraphAt) {
           this.telegraphed = true;
-          const chest = this.pos.clone().add(new THREE.Vector3(0, 1.55, 0));
+          const chest = this._chestPos.set(this.pos.x, this.pos.y + 1.55, this.pos.z);
           this.vfx.spawnTelegraphFlash(chest, m.unblockable);
           if (m.unblockable) {
             this.audio.playSFX('perilous_kan', { volume: 0.92, worldPos: this.pos });
@@ -295,7 +310,7 @@ export class EnemyActor {
           speed = chaseSpd;
         } else {
           // Martial circle-strafe
-          const perp = new THREE.Vector3(-dirToPlayer.z * this.strafeSign, 0, dirToPlayer.x * this.strafeSign);
+          const perp = this._perp.set(-dirToPlayer.z * this.strafeSign, 0, dirToPlayer.x * this.strafeSign);
           this.pos.addScaledVector(perp, 1.85 * this.speedMul * dt);
           speed = 1.85 * this.speedMul;
 

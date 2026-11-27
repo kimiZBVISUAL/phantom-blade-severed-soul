@@ -12,7 +12,39 @@ export class HUDManager {
     this.skipBtn = document.getElementById('btn-skip-cutscene');
     this.execPrompt = document.getElementById('execution-prompt');
 
+    // Cached DOM elements to eliminate per-frame querySelector/getElementById churn
+    this.elHpFill = document.getElementById('p-hp-fill');
+    this.elHpDelay = document.getElementById('p-hp-delay');
+    this.elHpNum = document.getElementById('p-hp-num');
+    this.elStaminaFill = document.getElementById('p-stamina-fill');
+    this.elGourd = document.getElementById('gourd-counter');
+    this.elShayiGems = Array.from(document.querySelectorAll('#shayi-orbs .shayi-gem'));
+    this.elUpperCards = Array.from(document.querySelectorAll('#chain-upper .skill-card'));
+    this.elLowerCards = Array.from(document.querySelectorAll('#chain-lower .skill-card'));
+    this.elCdUpper = document.getElementById('cd-upper');
+    this.elCdLower = document.getElementById('cd-lower');
+
+    this.elBossName = document.getElementById('boss-name');
+    this.elBossHpFill = document.getElementById('boss-hp-fill');
+    this.elBossHpDelay = document.getElementById('boss-hp-delay');
+    this.elBossPostureFill = document.getElementById('boss-posture-fill');
+    this.elBossOrbs = Array.from(document.querySelectorAll('#boss-phases .phase-orb'));
+
+    this.elComboPanel = document.getElementById('combo-panel');
+    this.elComboCount = document.getElementById('combo-count');
+    this.elComboTag = document.getElementById('combo-action-tag');
+    this.elStyleGrade = document.getElementById('style-grade');
+
     this._projVec = new THREE.Vector3();
+    this._popupVec = new THREE.Vector3();
+
+    // Dirty-checking caches so DOM is untouched when values don't change
+    this._lastBossState = { visible: false, hp: -1, posture: -1, phase: -1, phasesLeft: -1 };
+    this._lastExecVisible = false;
+    this._lastPlayerHp = -1;
+    this._lastPlayerStamina = -1;
+    this._lastPlayerGourds = -1;
+    this._lastPlayerShayi = -1;
   }
 
   setLoadingProgress(pct, label) {
@@ -68,75 +100,108 @@ export class HUDManager {
   }
 
   updatePlayer(player) {
-    const pct = Math.max(0, (player.hp / player.maxHp) * 100);
-    document.getElementById('p-hp-fill').style.width = `${pct}%`;
-    document.getElementById('p-hp-delay').style.width = `${pct}%`;
-    document.getElementById('p-hp-num').textContent = `${Math.ceil(player.hp)} / ${player.maxHp}`;
-    document.getElementById('p-stamina-fill').style.width = `${(player.stamina / player.maxStamina) * 100}%`;
-    document.getElementById('gourd-counter').textContent = `葫芦 ×${player.gourds}`;
+    const hpRounded = Math.ceil(player.hp);
+    if (hpRounded !== this._lastPlayerHp) {
+      this._lastPlayerHp = hpRounded;
+      const pct = `${Math.max(0, (player.hp / player.maxHp) * 100).toFixed(1)}%`;
+      this.elHpFill.style.width = pct;
+      this.elHpDelay.style.width = pct;
+      this.elHpNum.textContent = `${hpRounded} / ${player.maxHp}`;
+    }
 
-    const gems = document.querySelectorAll('#shayi-orbs .shayi-gem');
-    gems.forEach((el, idx) => {
-      el.classList.toggle('filled', idx < player.shayi);
-    });
+    const stamRounded = Math.round(player.stamina);
+    if (stamRounded !== this._lastPlayerStamina) {
+      this._lastPlayerStamina = stamRounded;
+      this.elStaminaFill.style.width = `${(player.stamina / player.maxStamina) * 100}%`;
+    }
+
+    if (player.gourds !== this._lastPlayerGourds) {
+      this._lastPlayerGourds = player.gourds;
+      this.elGourd.textContent = `葫芦 ×${player.gourds}`;
+    }
+
+    if (player.shayi !== this._lastPlayerShayi) {
+      this._lastPlayerShayi = player.shayi;
+      for (let i = 0; i < this.elShayiGems.length; i++) {
+        this.elShayiGems[i].classList.toggle('filled', i < player.shayi);
+      }
+    }
   }
 
   updateSkillChains(player) {
-    const upperCards = document.querySelectorAll('#chain-upper .skill-card');
-    upperCards.forEach((c, i) => c.classList.toggle('active', i === player.upperStep && player.upperCooldown <= 0));
-    const cdUp = document.getElementById('cd-upper');
+    for (let i = 0; i < this.elUpperCards.length; i++) {
+      this.elUpperCards[i].classList.toggle('active', i === player.upperStep && player.upperCooldown <= 0);
+    }
     if (player.upperCooldown > 0) {
-      cdUp.classList.remove('hidden');
-      cdUp.textContent = `调息 ${player.upperCooldown.toFixed(1)}s`;
+      this.elCdUpper.classList.remove('hidden');
+      this.elCdUpper.textContent = `调息 ${player.upperCooldown.toFixed(1)}s`;
     } else {
-      cdUp.classList.add('hidden');
+      this.elCdUpper.classList.add('hidden');
     }
 
-    const lowerCards = document.querySelectorAll('#chain-lower .skill-card');
-    lowerCards.forEach((c, i) => c.classList.toggle('active', i === player.lowerStep && player.lowerCooldown <= 0));
-    const cdLow = document.getElementById('cd-lower');
+    for (let i = 0; i < this.elLowerCards.length; i++) {
+      this.elLowerCards[i].classList.toggle('active', i === player.lowerStep && player.lowerCooldown <= 0);
+    }
     if (player.lowerCooldown > 0) {
-      cdLow.classList.remove('hidden');
-      cdLow.textContent = `调息 ${player.lowerCooldown.toFixed(1)}s`;
+      this.elCdLower.classList.remove('hidden');
+      this.elCdLower.textContent = `调息 ${player.lowerCooldown.toFixed(1)}s`;
     } else {
-      cdLow.classList.add('hidden');
+      this.elCdLower.classList.add('hidden');
     }
   }
 
   updateBoss(boss) {
-    if (!boss || !boss.active || boss.dead) {
-      this.bossHud.classList.add('hidden');
+    const visible = Boolean(boss && boss.active && !boss.dead);
+    const cache = this._lastBossState;
+    if (!visible) {
+      if (cache.visible) {
+        this.bossHud.classList.add('hidden');
+        cache.visible = false;
+      }
       return;
     }
-    this.bossHud.classList.remove('hidden');
-    document.getElementById('boss-name').textContent =
-      boss.phase === 2 ? '萧残阳 · 血煞入魔' : '萧残阳 · 断魂重剑';
+    if (!cache.visible) {
+      this.bossHud.classList.remove('hidden');
+      cache.visible = true;
+    }
+    if (boss.phase !== cache.phase) {
+      cache.phase = boss.phase;
+      this.elBossName.textContent = boss.phase === 2 ? '萧残阳 · 血煞入魔' : '萧残阳 · 断魂重剑';
+    }
 
-    const hpPct = Math.max(0, (boss.hp / boss.maxHp) * 100);
-    document.getElementById('boss-hp-fill').style.width = `${hpPct}%`;
-    document.getElementById('boss-hp-delay').style.width = `${hpPct}%`;
+    const hpPct = Math.round(Math.max(0, (boss.hp / boss.maxHp) * 1000)) / 10;
+    if (hpPct !== cache.hp) {
+      cache.hp = hpPct;
+      const w = `${hpPct}%`;
+      this.elBossHpFill.style.width = w;
+      this.elBossHpDelay.style.width = w;
+    }
 
-    const posPct = Math.min(100, (boss.posture / boss.maxPosture) * 100);
-    document.getElementById('boss-posture-fill').style.width = `${posPct}%`;
+    const posPct = Math.round(Math.min(100, (boss.posture / boss.maxPosture) * 1000)) / 10;
+    if (posPct !== cache.posture) {
+      cache.posture = posPct;
+      this.elBossPostureFill.style.width = `${posPct}%`;
+    }
 
-    const orbs = document.querySelectorAll('#boss-phases .phase-orb');
-    orbs[0].classList.toggle('active', boss.phasesLeft >= 1);
-    orbs[1].classList.toggle('active', boss.phasesLeft >= 2);
+    if (boss.phasesLeft !== cache.phasesLeft) {
+      cache.phasesLeft = boss.phasesLeft;
+      this.elBossOrbs[0].classList.toggle('active', boss.phasesLeft >= 1);
+      this.elBossOrbs[1].classList.toggle('active', boss.phasesLeft >= 2);
+    }
   }
 
   onComboUpdate(count, tag) {
-    const panel = document.getElementById('combo-panel');
     if (count <= 1) {
-      panel.classList.add('hidden');
+      this.elComboPanel.classList.add('hidden');
       return;
     }
-    panel.classList.remove('hidden');
-    document.getElementById('combo-count').innerHTML = `${count} <span>连斩</span>`;
-    if (tag) document.getElementById('combo-action-tag').textContent = tag;
+    this.elComboPanel.classList.remove('hidden');
+    this.elComboCount.innerHTML = `${count} <span>连斩</span>`;
+    if (tag) this.elComboTag.textContent = tag;
 
     const grades = ['斩', '破', '疾', '绝', '鬼神', '影之极'];
     const gi = Math.min(grades.length - 1, Math.floor(count / 4));
-    document.getElementById('style-grade').textContent = grades[gi];
+    this.elStyleGrade.textContent = grades[gi];
   }
 
   flashSkillCard(tier, title) {
@@ -163,17 +228,31 @@ export class HUDManager {
   }
 
   setExecutionPromptVisible(visible) {
-    this.execPrompt.classList.toggle('hidden', !visible);
+    if (visible !== this._lastExecVisible) {
+      this._lastExecVisible = visible;
+      this.execPrompt.classList.toggle('hidden', !visible);
+    }
   }
 
   createEnemyWorldBar(enemy) {
     const el = document.createElement('div');
     el.className = 'enemy-world-bar';
+    el.style.left = '0px';
+    el.style.top = '0px';
+    el.style.willChange = 'transform';
     el.innerHTML = `
       <div class="ew-name">${enemy.name}</div>
       <div class="ew-hp"><div class="ew-hp-fill"></div></div>
       <div class="ew-posture"><div class="ew-posture-fill"></div></div>
     `;
+    // Cache child refs directly on the element to eliminate querySelector every frame
+    el._hpFill = el.querySelector('.ew-hp-fill');
+    el._postureFill = el.querySelector('.ew-posture-fill');
+    el._lastHp = -1;
+    el._lastPosture = -1;
+    el._lastBroken = false;
+    el._visible = false;
+    el.style.display = 'none';
     this.worldMarkers.appendChild(el);
     return el;
   }
@@ -181,34 +260,61 @@ export class HUDManager {
   updateWorldMarkers(enemies) {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    for (const e of enemies) {
-      if (!e.worldBarEl) continue;
+    const pv = this._projVec;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      const bar = e.worldBarEl;
+      if (!bar) continue;
       if (e.dead || !e.active) {
-        e.worldBarEl.style.display = 'none';
+        if (bar._visible) {
+          bar.style.display = 'none';
+          bar._visible = false;
+        }
         continue;
       }
-      this._projVec.copy(e.pos).add(new THREE.Vector3(0, 2.25, 0)).project(this.camera);
-      if (this._projVec.z > 1) {
-        e.worldBarEl.style.display = 'none';
+      pv.set(e.pos.x, e.pos.y + 2.25, e.pos.z).project(this.camera);
+      if (pv.z > 1 || pv.x < -1.15 || pv.x > 1.15 || pv.y < -1.15 || pv.y > 1.15) {
+        if (bar._visible) {
+          bar.style.display = 'none';
+          bar._visible = false;
+        }
         continue;
       }
-      e.worldBarEl.style.display = 'block';
-      e.worldBarEl.style.left = `${(this._projVec.x * 0.5 + 0.5) * w}px`;
-      e.worldBarEl.style.top = `${(-this._projVec.y * 0.5 + 0.5) * h}px`;
-      e.worldBarEl.querySelector('.ew-hp-fill').style.width = `${(e.hp / e.maxHp) * 100}%`;
-      e.worldBarEl.querySelector('.ew-posture-fill').style.width = `${(e.posture / e.maxPosture) * 100}%`;
-      e.worldBarEl.classList.toggle('ew-broken', e.brokenTimer > 0);
+      if (!bar._visible) {
+        bar.style.display = 'block';
+        bar._visible = true;
+      }
+      const sx = ((pv.x * 0.5 + 0.5) * w) | 0;
+      const sy = ((-pv.y * 0.5 + 0.5) * h) | 0;
+      // GPU-composited translate3d — ZERO layout reflow!
+      bar.style.transform = `translate3d(${sx}px, ${sy}px, 0) translate(-50%, -100%)`;
+
+      const hpPct = Math.round((e.hp / e.maxHp) * 100);
+      if (hpPct !== bar._lastHp) {
+        bar._lastHp = hpPct;
+        bar._hpFill.style.width = `${hpPct}%`;
+      }
+      const posPct = Math.round((e.posture / e.maxPosture) * 100);
+      if (posPct !== bar._lastPosture) {
+        bar._lastPosture = posPct;
+        bar._postureFill.style.width = `${posPct}%`;
+      }
+      const isBroken = e.brokenTimer > 0;
+      if (isBroken !== bar._lastBroken) {
+        bar._lastBroken = isBroken;
+        bar.classList.toggle('ew-broken', isBroken);
+      }
     }
   }
 
   spawnPopup(worldPos, text, style = '') {
-    const v = worldPos.clone().project(this.camera);
-    if (v.z > 1) return;
+    this._popupVec.copy(worldPos).project(this.camera);
+    if (this._popupVec.z > 1) return;
     const el = document.createElement('div');
     el.className = `dmg-popup ${style}`;
     el.textContent = text;
-    el.style.left = `${(v.x * 0.5 + 0.5) * window.innerWidth + (Math.random() - 0.5) * 28}px`;
-    el.style.top = `${(-v.y * 0.5 + 0.5) * window.innerHeight}px`;
+    el.style.left = `${(this._popupVec.x * 0.5 + 0.5) * window.innerWidth + (Math.random() - 0.5) * 28}px`;
+    el.style.top = `${(-this._popupVec.y * 0.5 + 0.5) * window.innerHeight}px`;
     this.worldMarkers.appendChild(el);
     setTimeout(() => el.remove(), 780);
   }

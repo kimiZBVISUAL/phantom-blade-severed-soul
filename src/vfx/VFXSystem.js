@@ -1,13 +1,20 @@
 import * as THREE from 'three';
 
 /**
- * Dynamic 3D Sword Trail Ribbon:
+ * Dynamic 3D Sword Trail Ribbon (Zero-GC Pooled Implementation):
  * Records sub-frame (base, tip) world positions and builds a smooth emissive blade arc.
  */
 class SwordRibbon {
-  constructor(scene, maxSamples = 26, colorHex = 0xa8ecff) {
+  constructor(scene, maxSamples = 24, colorHex = 0xa8ecff) {
+    this.scene = scene;
     this.maxSamples = maxSamples;
-    this.samples = [];
+    this.count = 0;
+    this.samples = Array.from({ length: maxSamples }, () => ({
+      bx: 0, by: 0, bz: 0,
+      tx: 0, ty: 0, tz: 0,
+      life: 0,
+    }));
+
     this.geometry = new THREE.BufferGeometry();
     const positions = new Float32Array(maxSamples * 2 * 3);
     const colors = new Float32Array(maxSamples * 2 * 4);
@@ -19,6 +26,8 @@ class SwordRibbon {
       const d = a + 3;
       indices.push(a, b, c, b, d, c);
     }
+    this.posArr = positions;
+    this.colArr = colors;
     this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
     this.geometry.setIndex(indices);
@@ -34,6 +43,7 @@ class SwordRibbon {
 
     this.mesh = new THREE.Mesh(this.geometry, this.material);
     this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
     scene.add(this.mesh);
   }
 
@@ -41,100 +51,163 @@ class SwordRibbon {
     this.baseColor.setHex(hex);
   }
 
-  pushSample(basePos, tipPos, active) {
-    if (active) {
-      if (this.samples.length > 0) {
-        const prev = this.samples[this.samples.length - 1];
-        // Sub-step midpoint interpolation for ultra-smooth arcs
-        const midBase = prev.base.clone().lerp(basePos, 0.5);
-        const midTip = prev.tip.clone().lerp(tipPos, 0.5);
-        // Slightly bow midpoint outward along velocity for dramatic wuxia crescent curve
-        const vel = tipPos.clone().sub(prev.tip);
-        if (vel.lengthSq() > 0.002) {
-          midTip.addScaledVector(vel, 0.14);
-        }
-        this.samples.push({ base: midBase, tip: midTip, life: 1.0 });
+  _appendRaw(bx, by, bz, tx, ty, tz) {
+    if (this.count >= this.maxSamples) {
+      // Shift left in-place (zero allocation)
+      const first = this.samples[0];
+      for (let i = 0; i < this.maxSamples - 1; i++) {
+        this.samples[i] = this.samples[i + 1];
       }
-      this.samples.push({ base: basePos.clone(), tip: tipPos.clone(), life: 1.0 });
-      while (this.samples.length > this.maxSamples) {
-        this.samples.shift();
-      }
+      this.samples[this.maxSamples - 1] = first;
+      this.count = this.maxSamples - 1;
     }
+    const slot = this.samples[this.count++];
+    slot.bx = bx; slot.by = by; slot.bz = bz;
+    slot.tx = tx; slot.ty = ty; slot.tz = tz;
+    slot.life = 1.0;
+  }
+
+  pushSample(basePos, tipPos, active) {
+    if (!active) return;
+    if (this.count > 0) {
+      const prev = this.samples[this.count - 1];
+      const mbx = (prev.bx + basePos.x) * 0.5;
+      const mby = (prev.by + basePos.y) * 0.5;
+      const mbz = (prev.bz + basePos.z) * 0.5;
+      let mtx = (prev.tx + tipPos.x) * 0.5;
+      let mty = (prev.ty + tipPos.y) * 0.5;
+      let mtz = (prev.tz + tipPos.z) * 0.5;
+
+      const vx = tipPos.x - prev.tx;
+      const vy = tipPos.y - prev.ty;
+      const vz = tipPos.z - prev.tz;
+      if (vx * vx + vy * vy + vz * vz > 0.002) {
+        mtx += vx * 0.14;
+        mty += vy * 0.14;
+        mtz += vz * 0.14;
+      }
+      this._appendRaw(mbx, mby, mbz, mtx, mty, mtz);
+    }
+    this._appendRaw(basePos.x, basePos.y, basePos.z, tipPos.x, tipPos.y, tipPos.z);
   }
 
   update(dt) {
-    for (let i = this.samples.length - 1; i >= 0; i--) {
-      this.samples[i].life -= dt * 7.8;
-      if (this.samples[i].life <= 0) {
-        this.samples.splice(i, 1);
-      }
+    if (this.count === 0) {
+      this.mesh.visible = false;
+      return;
     }
 
-    const posAttr = this.geometry.attributes.position;
-    const colAttr = this.geometry.attributes.color;
-    const count = this.samples.length;
+    const decay = dt * 7.8;
+    let writeIdx = 0;
+    for (let i = 0; i < this.count; i++) {
+      const s = this.samples[i];
+      s.life -= decay;
+      if (s.life > 0) {
+        if (writeIdx !== i) {
+          const tmp = this.samples[writeIdx];
+          this.samples[writeIdx] = s;
+          this.samples[i] = tmp;
+        }
+        writeIdx++;
+      }
+    }
+    this.count = writeIdx;
 
-    if (count < 2) {
+    if (this.count < 2) {
       this.mesh.visible = false;
       return;
     }
     this.mesh.visible = true;
 
-    for (let i = 0; i < this.maxSamples; i++) {
-      const s = this.samples[Math.min(i, count - 1)];
-      const t = i < count ? i / (count - 1) : 0;
-      const alpha = i < count ? Math.pow(t, 1.5) * Math.max(0, s.life) : 0;
+    const pos = this.posArr;
+    const col = this.colArr;
+    const br = this.baseColor.r;
+    const bg = this.baseColor.g;
+    const bb = this.baseColor.b;
+    const br6 = br * 0.6;
+    const bg6 = bg * 0.6;
+    const bb6 = bb * 0.6;
+    const brHi = Math.min(1, br * 1.4);
+    const bgHi = Math.min(1, bg * 1.3);
+    const bbHi = Math.min(1, bb * 1.3);
+    const invCount = 1 / (this.count - 1);
 
-      posAttr.setXYZ(i * 2, s.base.x, s.base.y, s.base.z);
-      posAttr.setXYZ(i * 2 + 1, s.tip.x, s.tip.y, s.tip.z);
+    for (let i = 0; i < this.count; i++) {
+      const s = this.samples[i];
+      const t = i * invCount;
+      const alpha = Math.pow(t, 1.5) * s.life;
 
-      // Inner edge subtle, outer blade tip blazing bright
-      colAttr.setXYZW(i * 2, this.baseColor.r * 0.6, this.baseColor.g * 0.6, this.baseColor.b * 0.6, alpha * 0.18);
-      colAttr.setXYZW(i * 2 + 1, Math.min(1, this.baseColor.r * 1.4), Math.min(1, this.baseColor.g * 1.3), Math.min(1, this.baseColor.b * 1.3), alpha * 0.92);
+      const pIdx = i * 6;
+      pos[pIdx] = s.bx;
+      pos[pIdx + 1] = s.by;
+      pos[pIdx + 2] = s.bz;
+      pos[pIdx + 3] = s.tx;
+      pos[pIdx + 4] = s.ty;
+      pos[pIdx + 5] = s.tz;
+
+      const cIdx = i * 8;
+      col[cIdx] = br6;
+      col[cIdx + 1] = bg6;
+      col[cIdx + 2] = bb6;
+      col[cIdx + 3] = alpha * 0.18;
+      col[cIdx + 4] = brHi;
+      col[cIdx + 5] = bgHi;
+      col[cIdx + 6] = bbHi;
+      col[cIdx + 7] = alpha * 0.92;
     }
 
-    posAttr.needsUpdate = true;
-    colAttr.needsUpdate = true;
+    this.geometry.setDrawRange(0, (this.count - 1) * 6);
+    this.geometry.attributes.position.needsUpdate = true;
+    this.geometry.attributes.color.needsUpdate = true;
+  }
+
+  dispose() {
+    if (this.mesh) {
+      this.scene.remove(this.mesh);
+      this.geometry.dispose();
+      this.material.dispose();
+      this.mesh = null;
+    }
   }
 }
 
 export class VFXSystem {
-  constructor(scene) {
+  constructor(scene, { isMobile = false } = {}) {
     this.scene = scene;
+    this.isMobile = isMobile;
     this.ribbons = [];
-    this.sparks = [];
-    this.bloodDrops = [];
-    this.shockwaves = [];
-    this.afterimages = [];
-    this.lightningBolts = [];
+
+    this._tmpObj = new THREE.Object3D();
 
     this._initRainSystem();
     this._initSparkPool();
-    this._initBloodPool();
+    this._initBloodAndInkInstancedPools();
+    this._initShockwavePool();
+    this._initAfterimagePool();
+    this._initLightningPool();
   }
 
   createSwordRibbon(colorHex = 0xa8ecff) {
-    const r = new SwordRibbon(this.scene, 28, colorHex);
+    const r = new SwordRibbon(this.scene, this.isMobile ? 20 : 26, colorHex);
     this.ribbons.push(r);
     return r;
   }
 
   _initRainSystem() {
-    const rainCount = 3000;
-    const positions = new Float32Array(rainCount * 2 * 3);
-    this.rainSeeds = new Float32Array(rainCount * 4);
-    for (let i = 0; i < rainCount; i++) {
-      const x = (Math.random() - 0.5) * 46;
-      const y = Math.random() * 20;
-      const z = (Math.random() - 0.5) * 68 - 4;
-      const speed = 19 + Math.random() * 9;
-      this.rainSeeds[i * 4] = x;
-      this.rainSeeds[i * 4 + 1] = y;
-      this.rainSeeds[i * 4 + 2] = z;
-      this.rainSeeds[i * 4 + 3] = speed;
+    this.maxRainCount = this.isMobile ? 850 : 1600;
+    this.activeRainCount = this.maxRainCount;
+    const positions = new Float32Array(this.maxRainCount * 2 * 3);
+    this.rainPosArr = positions;
+    this.rainSeeds = new Float32Array(this.maxRainCount * 4);
+    for (let i = 0; i < this.maxRainCount; i++) {
+      this.rainSeeds[i * 4] = (Math.random() - 0.5) * 44;
+      this.rainSeeds[i * 4 + 1] = Math.random() * 20;
+      this.rainSeeds[i * 4 + 2] = (Math.random() - 0.5) * 62 - 4;
+      this.rainSeeds[i * 4 + 3] = 19 + Math.random() * 9;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setDrawRange(0, this.activeRainCount * 2);
     const mat = new THREE.LineBasicMaterial({
       color: 0x9ab8d8,
       transparent: true,
@@ -146,11 +219,24 @@ export class VFXSystem {
     this.scene.add(this.rainLines);
   }
 
+  setRainDensity(ratio) {
+    this.activeRainCount = Math.max(250, Math.min(this.maxRainCount, Math.floor(this.maxRainCount * ratio)));
+    this.rainLines.geometry.setDrawRange(0, this.activeRainCount * 2);
+  }
+
   _initSparkPool() {
-    this.maxSparks = 260;
+    this.maxSparks = this.isMobile ? 120 : 200;
+    this.sparkPool = Array.from({ length: this.maxSparks }, () => ({
+      active: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 0,
+    }));
+    this.sparkCursor = 0;
+    this.activeSparkCount = 0;
+
     const pos = new Float32Array(this.maxSparks * 2 * 3);
+    this.sparkPosArr = pos;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setDrawRange(0, 0);
     const mat = new THREE.LineBasicMaterial({
       color: 0xffd275,
       transparent: true,
@@ -163,8 +249,8 @@ export class VFXSystem {
     this.scene.add(this.sparkLines);
   }
 
-  _initBloodPool() {
-    this.sharedSphereGeo = new THREE.SphereGeometry(0.065, 6, 6);
+  _initBloodAndInkInstancedPools() {
+    this.sharedSphereGeo = new THREE.SphereGeometry(0.065, 5, 5);
     this.bloodMat = new THREE.MeshBasicMaterial({
       color: 0x9e0b14,
       transparent: true,
@@ -175,254 +261,344 @@ export class VFXSystem {
       transparent: true,
       opacity: 0.78,
     });
+
+    this.maxBlood = this.isMobile ? 56 : 100;
+    this.maxInk = this.isMobile ? 36 : 64;
+
+    this.bloodMesh = new THREE.InstancedMesh(this.sharedSphereGeo, this.bloodMat, this.maxBlood);
+    this.bloodMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.bloodMesh.frustumCulled = false;
+    this.bloodMesh.count = 0;
+    this.scene.add(this.bloodMesh);
+
+    this.inkMesh = new THREE.InstancedMesh(this.sharedSphereGeo, this.inkMat, this.maxInk);
+    this.inkMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.inkMesh.frustumCulled = false;
+    this.inkMesh.count = 0;
+    this.scene.add(this.inkMesh);
+
+    this.bloodParticles = Array.from({ length: this.maxBlood }, () => ({
+      active: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, scale: 1, life: 0,
+    }));
+    this.inkParticles = Array.from({ length: this.maxInk }, () => ({
+      active: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, scale: 1, life: 0,
+    }));
+    this.bloodCursor = 0;
+    this.inkCursor = 0;
+  }
+
+  _initShockwavePool() {
+    this.sharedRingGeo = new THREE.RingGeometry(0.42, 0.49, 28);
+    this.shockwavePool = [];
+    for (let i = 0; i < 12; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xff3b3b,
+        transparent: true,
+        opacity: 0.75,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.sharedRingGeo, mat);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.shockwavePool.push({ active: false, mesh, mat, age: 0, duration: 0.38, maxRadius: 4.0 });
+    }
+    this.shockwaveCursor = 0;
+  }
+
+  _initAfterimagePool() {
+    this.sharedGhostBodyGeo = new THREE.CylinderGeometry(0.22, 0.38, 1.55, 8);
+    this.sharedGhostHatGeo = new THREE.ConeGeometry(0.46, 0.2, 10);
+    this.afterimagePool = [];
+    for (let i = 0; i < 8; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x5ce6dc,
+        transparent: true,
+        opacity: 0.36,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(this.sharedGhostBodyGeo, mat);
+      body.position.y = 0.85;
+      const hat = new THREE.Mesh(this.sharedGhostHatGeo, mat);
+      hat.position.y = 1.72;
+      group.add(body, hat);
+      group.visible = false;
+      this.scene.add(group);
+      this.afterimagePool.push({ active: false, group, mat, life: 0 });
+    }
+    this.afterimageCursor = 0;
+  }
+
+  _initLightningPool() {
+    this.lightningPool = [];
+    for (let i = 0; i < 4; i++) {
+      const arr = new Float32Array(13 * 3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: 0xff2b37,
+        transparent: true,
+        opacity: 1.0,
+        blending: THREE.AdditiveBlending,
+      });
+      const line = new THREE.Line(geo, mat);
+      line.frustumCulled = false;
+      line.visible = false;
+      this.scene.add(line);
+      this.lightningPool.push({ active: false, line, geo, arr, mat, life: 0 });
+    }
+    this.lightningCursor = 0;
   }
 
   spawnSparks(origin, count = 42, colorHex = 0xffcf6e, speedScale = 1.0) {
     this.sparkLines.material.color.setHex(colorHex);
-    for (let i = 0; i < count; i++) {
-      if (this.sparks.length >= this.maxSparks) this.sparks.shift();
+    const n = this.isMobile ? Math.ceil(count * 0.55) : count;
+    for (let i = 0; i < n; i++) {
+      const s = this.sparkPool[this.sparkCursor];
+      this.sparkCursor = (this.sparkCursor + 1) % this.maxSparks;
       const theta = Math.random() * Math.PI * 2;
       const phi = (Math.random() - 0.25) * Math.PI * 0.85;
       const spd = (5.5 + Math.random() * 13.5) * speedScale;
-      this.sparks.push({
-        pos: origin.clone(),
-        vel: new THREE.Vector3(
-          Math.cos(theta) * Math.cos(phi) * spd,
-          Math.abs(Math.sin(phi)) * spd + 2.2,
-          Math.sin(theta) * Math.cos(phi) * spd
-        ),
-        life: 0.22 + Math.random() * 0.28,
-        maxLife: 0.45,
-      });
+      const cosPhi = Math.cos(phi);
+      s.active = true;
+      s.x = origin.x; s.y = origin.y; s.z = origin.z;
+      s.vx = Math.cos(theta) * cosPhi * spd;
+      s.vy = Math.abs(Math.sin(phi)) * spd + 2.2;
+      s.vz = Math.sin(theta) * cosPhi * spd;
+      s.life = 0.22 + Math.random() * 0.28;
     }
   }
 
   spawnBloodAndInk(origin, dir, count = 20) {
-    for (let i = 0; i < count; i++) {
+    const n = this.isMobile ? Math.ceil(count * 0.55) : count;
+    const dx = dir ? dir.x : 0;
+    const dy = dir ? dir.y : 0;
+    const dz = dir ? dir.z : 0;
+    for (let i = 0; i < n; i++) {
       const isInk = i % 3 === 0;
-      const mesh = new THREE.Mesh(this.sharedSphereGeo, isInk ? this.inkMat : this.bloodMat);
-      mesh.position.copy(origin);
-      const scale = isInk ? 1.4 + Math.random() * 1.8 : 0.7 + Math.random() * 1.3;
-      mesh.scale.setScalar(scale);
-      this.scene.add(mesh);
-
-      const spread = new THREE.Vector3(
-        (Math.random() - 0.5) * 5.5,
-        1.5 + Math.random() * 4.2,
-        (Math.random() - 0.5) * 5.5
-      );
-      if (dir) spread.addScaledVector(dir, 3.5 + Math.random() * 4.0);
-
-      this.bloodDrops.push({
-        mesh,
-        vel: spread,
-        life: 0.35 + Math.random() * 0.3,
-      });
+      const pool = isInk ? this.inkParticles : this.bloodParticles;
+      const cap = isInk ? this.maxInk : this.maxBlood;
+      const idx = isInk ? (this.inkCursor = (this.inkCursor + 1) % cap) : (this.bloodCursor = (this.bloodCursor + 1) % cap);
+      const p = pool[idx];
+      const boost = dir ? (3.5 + Math.random() * 4.0) : 0;
+      p.active = true;
+      p.x = origin.x; p.y = origin.y; p.z = origin.z;
+      p.vx = (Math.random() - 0.5) * 5.5 + dx * boost;
+      p.vy = 1.5 + Math.random() * 4.2 + dy * boost;
+      p.vz = (Math.random() - 0.5) * 5.5 + dz * boost;
+      p.scale = isInk ? 1.4 + Math.random() * 1.8 : 0.7 + Math.random() * 1.3;
+      p.life = 0.35 + Math.random() * 0.3;
     }
   }
 
   spawnShockwave(pos, { color = 0xff3b3b, maxRadius = 4.2, duration = 0.38, vertical = false } = {}) {
-    const geo = new THREE.RingGeometry(0.42, 0.49, 36);
-    const mat = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.75,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.copy(pos);
+    const sw = this.shockwavePool[this.shockwaveCursor];
+    this.shockwaveCursor = (this.shockwaveCursor + 1) % this.shockwavePool.length;
+    sw.active = true;
+    sw.age = 0;
+    sw.duration = duration;
+    sw.maxRadius = maxRadius;
+    sw.mat.color.setHex(color);
+    sw.mat.opacity = 0.75;
+    sw.mesh.position.copy(pos);
+    sw.mesh.scale.setScalar(0.4);
+    sw.mesh.rotation.set(0, 0, 0);
     if (!vertical) {
-      mesh.rotation.x = -Math.PI * 0.5;
-      mesh.position.y += 0.08;
+      sw.mesh.rotation.x = -Math.PI * 0.5;
+      sw.mesh.position.y += 0.08;
     } else {
-      mesh.lookAt(pos.x, pos.y + 0.2, pos.z + 1);
+      sw.mesh.lookAt(pos.x, pos.y + 0.2, pos.z + 1);
     }
-    this.scene.add(mesh);
-    this.shockwaves.push({ mesh, mat, geo, age: 0, duration, maxRadius });
+    sw.mesh.visible = true;
   }
 
   spawnTelegraphFlash(pos, isUnblockableRed = false) {
     const color = isUnblockableRed ? 0xff1e27 : 0xffe28a;
-    this.spawnSparks(pos, isUnblockableRed ? 18 : 10, color, 0.65);
+    this.spawnSparks(pos, isUnblockableRed ? 16 : 9, color, 0.65);
     this.spawnShockwave(pos, { color, maxRadius: isUnblockableRed ? 1.15 : 0.75, duration: 0.22, vertical: true });
   }
 
   spawnDashAfterimage(sourceGroup, tintHex = 0x5ce6dc) {
-    const ghostMat = new THREE.MeshBasicMaterial({
-      color: tintHex,
-      transparent: true,
-      opacity: 0.36,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    const ghostGroup = new THREE.Group();
-    ghostGroup.position.copy(sourceGroup.position);
-    ghostGroup.rotation.copy(sourceGroup.rotation);
-    ghostGroup.scale.copy(sourceGroup.scale);
-
-    // Lightweight silhouette proxy matching wuxia hat + cloak form
-    const bodyGeo = new THREE.CylinderGeometry(0.22, 0.38, 1.55, 10);
-    const hatGeo = new THREE.ConeGeometry(0.46, 0.2, 14);
-    const body = new THREE.Mesh(bodyGeo, ghostMat);
-    body.position.y = 0.85;
-    const hat = new THREE.Mesh(hatGeo, ghostMat);
-    hat.position.y = 1.72;
-    ghostGroup.add(body, hat);
-
-    this.scene.add(ghostGroup);
-    this.afterimages.push({ group: ghostGroup, mat: ghostMat, geos: [bodyGeo, hatGeo], life: 0.32 });
+    const ai = this.afterimagePool[this.afterimageCursor];
+    this.afterimageCursor = (this.afterimageCursor + 1) % this.afterimagePool.length;
+    ai.active = true;
+    ai.life = 0.32;
+    ai.mat.color.setHex(tintHex);
+    ai.mat.opacity = 0.36;
+    ai.group.position.copy(sourceGroup.position);
+    ai.group.rotation.copy(sourceGroup.rotation);
+    ai.group.scale.copy(sourceGroup.scale);
+    ai.group.visible = true;
   }
 
   spawnCrimsonLightning(targetPos, colorHex = 0xff2b37) {
-    const points = [];
+    const lb = this.lightningPool[this.lightningCursor];
+    this.lightningCursor = (this.lightningCursor + 1) % this.lightningPool.length;
     const segs = 12;
     const topY = targetPos.y + 15.0;
+    const arr = lb.arr;
     for (let i = 0; i <= segs; i++) {
       const t = i / segs;
       const jitter = (i === 0 || i === segs) ? 0 : (Math.random() - 0.5) * 1.4;
-      points.push(new THREE.Vector3(
-        targetPos.x + jitter,
-        topY * (1 - t) + targetPos.y * t,
-        targetPos.z + jitter * 0.8
-      ));
+      arr[i * 3] = targetPos.x + jitter;
+      arr[i * 3 + 1] = topY * (1 - t) + targetPos.y * t;
+      arr[i * 3 + 2] = targetPos.z + jitter * 0.8;
     }
-    const geo = new THREE.BufferGeometry().setFromPoints(points);
-    const mat = new THREE.LineBasicMaterial({
-      color: colorHex,
-      transparent: true,
-      opacity: 1.0,
-      blending: THREE.AdditiveBlending,
-    });
-    const line = new THREE.Line(geo, mat);
-    this.scene.add(line);
-    this.lightningBolts.push({ line, geo, mat, life: 0.26 });
+    lb.geo.attributes.position.needsUpdate = true;
+    lb.mat.color.setHex(colorHex);
+    lb.mat.opacity = 1.0;
+    lb.life = 0.26;
+    lb.active = true;
+    lb.line.visible = true;
     this.spawnShockwave(targetPos, { color: colorHex, maxRadius: 5.8, duration: 0.45 });
   }
 
-  update(dt, focusCenter) {
-    // 1. Update ribbons
-    for (const r of this.ribbons) {
-      r.update(dt);
-    }
-
-    // 2. Update storm rain centered around player/camera
-    const rPos = this.rainLines.geometry.attributes.position;
-    const cx = focusCenter ? focusCenter.x : 0;
-    const cz = focusCenter ? focusCenter.z : 0;
-    for (let i = 0; i < 3000; i++) {
-      let x = this.rainSeeds[i * 4];
-      let y = this.rainSeeds[i * 4 + 1];
-      let z = this.rainSeeds[i * 4 + 2];
-      const spd = this.rainSeeds[i * 4 + 3];
-
-      y -= spd * dt;
-      x -= 2.8 * dt;
-      if (y < 0) {
-        y = 18 + Math.random() * 4;
-        x = cx + (Math.random() - 0.5) * 44;
-        z = cz + (Math.random() - 0.5) * 48;
-      }
-      this.rainSeeds[i * 4] = x;
-      this.rainSeeds[i * 4 + 1] = y;
-      this.rainSeeds[i * 4 + 2] = z;
-
-      // Shelter rain under Main Hall roof except through the shattered central skylight!
-      const underHallRoof = z < -13.6 && z > -29.4 && Math.abs(x) < 10.6;
-      const inSkylightShaft = Math.abs(x) < 3.1 && z < -17.5 && z > -23.5;
-      if (underHallRoof && !inSkylightShaft && y < 8.5) {
-        rPos.setXYZ(i * 2, 0, -50, 0);
-        rPos.setXYZ(i * 2 + 1, 0, -50, 0);
-      } else {
-        rPos.setXYZ(i * 2, x, y, z);
-        rPos.setXYZ(i * 2 + 1, x + 0.09, y + 0.62, z);
-      }
-    }
-    rPos.needsUpdate = true;
-
-    // 3. Update metallic sparks
-    const sPos = this.sparkLines.geometry.attributes.position;
-    for (let i = this.sparks.length - 1; i >= 0; i--) {
-      const s = this.sparks[i];
-      s.life -= dt;
-      if (s.life <= 0) {
-        this.sparks.splice(i, 1);
+  _updateInstancedPool(particles, instancedMesh, dt) {
+    let activeCount = 0;
+    const dummy = this._tmpObj;
+    const scaleDecay = Math.pow(0.05, dt * 1.8); // framerate-independent shrink
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      if (!p.active) continue;
+      p.life -= dt;
+      p.vy -= 18.0 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      p.scale *= scaleDecay;
+      if (p.life <= 0 || p.y < 0 || p.scale < 0.04) {
+        p.active = false;
         continue;
       }
-      s.vel.y -= 24.0 * dt;
-      s.pos.addScaledVector(s.vel, dt);
-      if (s.pos.y < 0.05) {
-        s.pos.y = 0.05;
-        s.vel.y *= -0.45;
-        s.vel.x *= 0.7;
-        s.vel.z *= 0.7;
-      }
+      dummy.position.set(p.x, p.y, p.z);
+      dummy.scale.setScalar(p.scale);
+      dummy.updateMatrix();
+      instancedMesh.setMatrixAt(activeCount++, dummy.matrix);
     }
-    for (let i = 0; i < this.maxSparks; i++) {
-      if (i < this.sparks.length) {
-        const s = this.sparks[i];
-        sPos.setXYZ(i * 2, s.pos.x, s.pos.y, s.pos.z);
-        sPos.setXYZ(i * 2 + 1, s.pos.x - s.vel.x * 0.026, s.pos.y - s.vel.y * 0.026, s.pos.z - s.vel.z * 0.026);
+    instancedMesh.count = activeCount;
+    if (activeCount > 0) {
+      instancedMesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  update(dt, focusCenter) {
+    // 1. Update sword ribbons
+    for (let i = 0; i < this.ribbons.length; i++) {
+      this.ribbons[i].update(dt);
+    }
+
+    // 2. Update storm rain (direct Float32Array write — 3x faster than setXYZ)
+    const rArr = this.rainPosArr;
+    const seeds = this.rainSeeds;
+    const cx = focusCenter ? focusCenter.x : 0;
+    const cz = focusCenter ? focusCenter.z : 0;
+    const driftX = 2.8 * dt;
+    const rainCount = this.activeRainCount;
+
+    for (let i = 0; i < rainCount; i++) {
+      const si = i * 4;
+      let x = seeds[si] - driftX;
+      let y = seeds[si + 1] - seeds[si + 3] * dt;
+      let z = seeds[si + 2];
+
+      if (y < 0) {
+        y = 18 + Math.random() * 4;
+        x = cx + (Math.random() - 0.5) * 42;
+        z = cz + (Math.random() - 0.5) * 46;
+      }
+      seeds[si] = x;
+      seeds[si + 1] = y;
+      seeds[si + 2] = z;
+
+      const pi = i * 6;
+      const underHallRoof = z < -13.6 && z > -29.4 && x > -10.6 && x < 10.6;
+      if (underHallRoof && y < 8.5 && !(x > -3.1 && x < 3.1 && z < -17.5 && z > -23.5)) {
+        rArr[pi] = 0; rArr[pi + 1] = -50; rArr[pi + 2] = 0;
+        rArr[pi + 3] = 0; rArr[pi + 4] = -50; rArr[pi + 5] = 0;
       } else {
-        sPos.setXYZ(i * 2, 0, -50, 0);
-        sPos.setXYZ(i * 2 + 1, 0, -50, 0);
+        rArr[pi] = x; rArr[pi + 1] = y; rArr[pi + 2] = z;
+        rArr[pi + 3] = x + 0.09; rArr[pi + 4] = y + 0.62; rArr[pi + 5] = z;
       }
     }
-    sPos.needsUpdate = true;
+    this.rainLines.geometry.attributes.position.needsUpdate = true;
 
-    // 4. Update blood & ink droplets
-    for (let i = this.bloodDrops.length - 1; i >= 0; i--) {
-      const b = this.bloodDrops[i];
-      b.life -= dt;
-      b.vel.y -= 18.0 * dt;
-      b.mesh.position.addScaledVector(b.vel, dt);
-      b.mesh.scale.multiplyScalar(0.95);
-      if (b.life <= 0 || b.mesh.position.y < 0) {
-        this.scene.remove(b.mesh);
-        this.bloodDrops.splice(i, 1);
+    // 3. Update metallic sparks (direct Float32Array write + drawRange culling)
+    const sArr = this.sparkPosArr;
+    let sparkCount = 0;
+    for (let i = 0; i < this.maxSparks; i++) {
+      const s = this.sparkPool[i];
+      if (!s.active) continue;
+      s.life -= dt;
+      if (s.life <= 0) {
+        s.active = false;
+        continue;
       }
+      s.vy -= 24.0 * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.z += s.vz * dt;
+      if (s.y < 0.05) {
+        s.y = 0.05;
+        s.vy *= -0.45;
+        s.vx *= 0.7;
+        s.vz *= 0.7;
+      }
+      const pi = sparkCount * 6;
+      sArr[pi] = s.x; sArr[pi + 1] = s.y; sArr[pi + 2] = s.z;
+      sArr[pi + 3] = s.x - s.vx * 0.026;
+      sArr[pi + 4] = s.y - s.vy * 0.026;
+      sArr[pi + 5] = s.z - s.vz * 0.026;
+      sparkCount++;
     }
+    this.sparkLines.geometry.setDrawRange(0, sparkCount * 2);
+    if (sparkCount > 0 || this.activeSparkCount > 0) {
+      this.sparkLines.geometry.attributes.position.needsUpdate = true;
+    }
+    this.activeSparkCount = sparkCount;
 
-    // 5. Update shockwaves
-    for (let i = this.shockwaves.length - 1; i >= 0; i--) {
-      const sw = this.shockwaves[i];
+    // 4. Update instanced blood & ink droplets (2 draw calls total!)
+    this._updateInstancedPool(this.bloodParticles, this.bloodMesh, dt);
+    this._updateInstancedPool(this.inkParticles, this.inkMesh, dt);
+
+    // 5. Update pooled shockwaves
+    for (let i = 0; i < this.shockwavePool.length; i++) {
+      const sw = this.shockwavePool[i];
+      if (!sw.active) continue;
       sw.age += dt;
       const u = Math.min(1, sw.age / sw.duration);
       const sc = 0.4 + sw.maxRadius * (1 - Math.pow(1 - u, 3));
       sw.mesh.scale.setScalar(sc);
       sw.mat.opacity = (1 - u) * 0.9;
       if (u >= 1) {
-        this.scene.remove(sw.mesh);
-        sw.geo.dispose();
-        sw.mat.dispose();
-        this.shockwaves.splice(i, 1);
+        sw.active = false;
+        sw.mesh.visible = false;
       }
     }
 
-    // 6. Update ghost afterimages
-    for (let i = this.afterimages.length - 1; i >= 0; i--) {
-      const ai = this.afterimages[i];
+    // 6. Update pooled ghost afterimages
+    for (let i = 0; i < this.afterimagePool.length; i++) {
+      const ai = this.afterimagePool[i];
+      if (!ai.active) continue;
       ai.life -= dt;
       ai.mat.opacity = Math.max(0, (ai.life / 0.32) * 0.36);
       if (ai.life <= 0) {
-        this.scene.remove(ai.group);
-        ai.geos.forEach((g) => g.dispose());
-        ai.mat.dispose();
-        this.afterimages.splice(i, 1);
+        ai.active = false;
+        ai.group.visible = false;
       }
     }
 
-    // 7. Update lightning bolts
-    for (let i = this.lightningBolts.length - 1; i >= 0; i--) {
-      const lb = this.lightningBolts[i];
+    // 7. Update pooled lightning bolts
+    for (let i = 0; i < this.lightningPool.length; i++) {
+      const lb = this.lightningPool[i];
+      if (!lb.active) continue;
       lb.life -= dt;
       lb.mat.opacity = Math.max(0, lb.life / 0.26);
       if (lb.life <= 0) {
-        this.scene.remove(lb.line);
-        lb.geo.dispose();
-        lb.mat.dispose();
-        this.lightningBolts.splice(i, 1);
+        lb.active = false;
+        lb.line.visible = false;
       }
     }
   }

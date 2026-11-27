@@ -31,6 +31,15 @@ export class MobileControls {
     this.btnRecenter = document.getElementById('mbtn-recenter');
     this.btnFullscreen = document.getElementById('mbtn-fullscreen');
 
+    // Cache button child label elements & dirty state to avoid 60Hz DOM mutations
+    this._lblAttack = this.btnAttack?.querySelector('.mbtn-label');
+    this._lblUpper = this.btnUpper?.querySelector('.mbtn-label');
+    this._subUpper = this.btnUpper?.querySelector('.mbtn-sub');
+    this._lblLower = this.btnLower?.querySelector('.mbtn-label');
+    this._subLower = this.btnLower?.querySelector('.mbtn-sub');
+    this._subGourd = this.btnGourd?.querySelector('.mbtn-sub');
+    this._syncCache = {};
+
     this.joyTouchId = null;
     this.joyCenter = { x: 0, y: 0 };
     this.joyMaxRadius = 54;
@@ -382,58 +391,63 @@ export class MobileControls {
 
   syncState(player, { canExec = false, controlsOn = false } = {}) {
     if (!this.enabled || !this.root) return;
-    this.root.classList.toggle('hidden', !controlsOn);
-    this._updatePortraitHint();
-    if (!player) return;
+    const c = this._syncCache;
+    if (c.controlsOn !== controlsOn) {
+      c.controlsOn = controlsOn;
+      this.root.classList.toggle('hidden', !controlsOn);
+      this._updatePortraitHint();
+    }
+    if (!player || !controlsOn) return;
 
-    // Attack button riposte glow
-    if (this.btnAttack) {
-      const isRiposte = player.riposteTimer > 0;
+    const isRiposte = player.riposteTimer > 0;
+    if (c.isRiposte !== isRiposte && this.btnAttack) {
+      c.isRiposte = isRiposte;
       this.btnAttack.classList.toggle('riposte-ready', isRiposte);
-      const lbl = this.btnAttack.querySelector('.mbtn-label');
-      if (lbl) lbl.textContent = isRiposte ? '追魂' : '斩';
+      if (this._lblAttack) this._lblAttack.textContent = isRiposte ? '追魂' : '斩';
     }
 
-    // Parry active state
-    if (this.btnParry) {
-      this.btnParry.classList.toggle('guard-active', player.parryTimer > 0 || player.guardHolding);
+    const guardActive = player.parryTimer > 0 || player.guardHolding;
+    if (c.guardActive !== guardActive && this.btnParry) {
+      c.guardActive = guardActive;
+      this.btnParry.classList.toggle('guard-active', guardActive);
     }
 
-    // Dash stamina availability
-    if (this.btnDash) {
-      this.btnDash.classList.toggle('on-cooldown', player.stamina < 18);
+    const dashLow = player.stamina < 18;
+    if (c.dashLow !== dashLow && this.btnDash) {
+      c.dashLow = dashLow;
+      this.btnDash.classList.toggle('on-cooldown', dashLow);
     }
 
-    // Upper Skill Chain button live step & cooldown
-    if (this.btnUpper) {
-      const cd = player.upperCooldown;
-      this.btnUpper.classList.toggle('on-cooldown', cd > 0);
-      const lbl = this.btnUpper.querySelector('.mbtn-label');
-      const sub = this.btnUpper.querySelector('.mbtn-sub');
-      if (lbl) lbl.textContent = UPPER_NAMES[player.upperStep] || '影杀';
-      if (sub) sub.textContent = cd > 0 ? `${cd.toFixed(1)}s` : `${player.upperStep + 1}/3`;
+    const upCdKey = player.upperCooldown > 0 ? player.upperCooldown.toFixed(1) : '';
+    const upState = `${player.upperStep}:${upCdKey}`;
+    if (c.upState !== upState && this.btnUpper) {
+      c.upState = upState;
+      this.btnUpper.classList.toggle('on-cooldown', player.upperCooldown > 0);
+      if (this._lblUpper) this._lblUpper.textContent = UPPER_NAMES[player.upperStep] || '影杀';
+      if (this._subUpper) this._subUpper.textContent = upCdKey ? `${upCdKey}s` : `${player.upperStep + 1}/3`;
     }
 
-    // Lower Skill Chain button live step & cooldown
-    if (this.btnLower) {
-      const cd = player.lowerCooldown;
-      this.btnLower.classList.toggle('on-cooldown', cd > 0);
-      const lbl = this.btnLower.querySelector('.mbtn-label');
-      const sub = this.btnLower.querySelector('.mbtn-sub');
-      if (lbl) lbl.textContent = LOWER_NAMES[player.lowerStep] || '赤霄';
-      if (sub) sub.textContent = cd > 0 ? `${cd.toFixed(1)}s` : `${player.lowerStep + 1}/3`;
+    const lowCdKey = player.lowerCooldown > 0 ? player.lowerCooldown.toFixed(1) : '';
+    const lowState = `${player.lowerStep}:${lowCdKey}`;
+    if (c.lowState !== lowState && this.btnLower) {
+      c.lowState = lowState;
+      this.btnLower.classList.toggle('on-cooldown', player.lowerCooldown > 0);
+      if (this._lblLower) this._lblLower.textContent = LOWER_NAMES[player.lowerStep] || '赤霄';
+      if (this._subLower) this._subLower.textContent = lowCdKey ? `${lowCdKey}s` : `${player.lowerStep + 1}/3`;
     }
 
-    // Gourd count & low-HP pulse
-    if (this.btnGourd) {
-      const sub = this.btnGourd.querySelector('.mbtn-sub');
-      if (sub) sub.textContent = `×${player.gourds}`;
-      this.btnGourd.classList.toggle('on-cooldown', player.gourds <= 0 || player.hp >= player.maxHp);
-      this.btnGourd.classList.toggle('low-hp-pulse', player.gourds > 0 && player.hp < player.maxHp * 0.45);
+    const gourdOff = player.gourds <= 0 || player.hp >= player.maxHp;
+    const lowHp = player.gourds > 0 && player.hp < player.maxHp * 0.45;
+    const gourdState = `${player.gourds}:${gourdOff}:${lowHp}`;
+    if (c.gourdState !== gourdState && this.btnGourd) {
+      c.gourdState = gourdState;
+      if (this._subGourd) this._subGourd.textContent = `×${player.gourds}`;
+      this.btnGourd.classList.toggle('on-cooldown', gourdOff);
+      this.btnGourd.classList.toggle('low-hp-pulse', lowHp);
     }
 
-    // Execution button visibility
-    if (this.btnExec) {
+    if (c.canExec !== canExec && this.btnExec) {
+      c.canExec = canExec;
       this.btnExec.classList.toggle('hidden', !canExec);
     }
   }

@@ -11,7 +11,7 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
  *    every frame so single- and two-handed blades NEVER float, flip, or clip!
  */
 export class FighterRig {
-  constructor({ gltfSource, weaponPrototype, scale = 1.0, bladeLength = 1.08, twoHanded = false, ribbon }) {
+  constructor({ gltfSource, weaponPrototype, scale = 1.0, bladeLength = 1.08, twoHanded = false, ribbon, castShadow = true }) {
     this.root = new THREE.Group();
     this.model = SkeletonUtils.clone(gltfSource.scene);
     this.model.scale.setScalar(scale);
@@ -25,13 +25,15 @@ export class FighterRig {
 
     this.bones = {};
     this.meshes = [];
+    this.emissiveMeshes = [];
 
     this.model.traverse((child) => {
       if (child.isMesh) {
-        child.castShadow = true;
+        child.castShadow = castShadow;
         child.receiveShadow = true;
         if (child.material) {
           child.material = child.material.clone();
+          if (child.material.emissive) this.emissiveMeshes.push(child);
         }
         this.meshes.push(child);
       }
@@ -118,6 +120,22 @@ export class FighterRig {
     this._qRootInv = new THREE.Quaternion();
     this._tmpBase = new THREE.Vector3();
     this._tmpTip = new THREE.Vector3();
+    this._tmpEuler = new THREE.Euler(0, 0, 0, 'XYZ');
+    this._tmpOffsetQ = new THREE.Quaternion();
+    this._tmpTargetQ = new THREE.Quaternion();
+    this._hitFlashWasOn = false;
+  }
+
+  dispose() {
+    if (this.mixer) {
+      this.mixer.stopAllAction();
+      this.mixer.uncacheRoot(this.model);
+    }
+    for (const m of this.meshes) {
+      if (m.material) m.material.dispose();
+    }
+    this.meshes.length = 0;
+    this.emissiveMeshes.length = 0;
   }
 
   _resolveClipKey(requested) {
@@ -290,7 +308,7 @@ export class FighterRig {
   }
 
   getBladeWorldSegment() {
-    this.weaponSocket.updateMatrixWorld(true);
+    // weaponSocket.updateMatrixWorld(true) was already called inside _solveWeaponHandConstraint()
     this.bladeBaseMarker.getWorldPosition(this._tmpBase);
     this.bladeTipMarker.getWorldPosition(this._tmpTip);
     return { base: this._tmpBase, tip: this._tmpTip };
@@ -299,9 +317,10 @@ export class FighterRig {
   _applyBoneOffset(boneName, rx, ry, rz, blend = 1.0) {
     const b = this.bones[boneName];
     if (!b) return;
-    const offsetQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'XYZ'));
-    const targetQ = b.quaternion.clone().multiply(offsetQ);
-    b.quaternion.slerp(targetQ, blend);
+    this._tmpEuler.set(rx, ry, rz, 'XYZ');
+    this._tmpOffsetQ.setFromEuler(this._tmpEuler);
+    this._tmpTargetQ.copy(b.quaternion).multiply(this._tmpOffsetQ);
+    b.quaternion.slerp(this._tmpTargetQ, blend);
   }
 
   update(dt, {
@@ -401,14 +420,16 @@ export class FighterRig {
       this.model.position.y = 0;
     }
 
-    // Hit-Flash Emissive Feedback
-    if (this.poseState.hitFlash > 0) {
-      this.poseState.hitFlash -= dt;
+    // Hit-Flash Emissive Feedback (only mutates materials on state transition)
+    if (this.poseState.hitFlash > 0 || this._hitFlashWasOn) {
+      this.poseState.hitFlash = Math.max(0, this.poseState.hitFlash - dt);
       const flashOn = this.poseState.hitFlash > 0;
-      for (const m of this.meshes) {
-        if (m.material && m.material.emissive) {
-          m.material.emissive.setHex(flashOn ? 0xffeedd : 0x000000);
-          m.material.emissiveIntensity = flashOn ? 1.35 : 0.0;
+      if (flashOn !== this._hitFlashWasOn) {
+        this._hitFlashWasOn = flashOn;
+        for (let i = 0; i < this.emissiveMeshes.length; i++) {
+          const mat = this.emissiveMeshes[i].material;
+          mat.emissive.setHex(flashOn ? 0xffeedd : 0x000000);
+          mat.emissiveIntensity = flashOn ? 1.35 : 0.0;
         }
       }
     }
@@ -416,9 +437,9 @@ export class FighterRig {
     // Solve exact anatomical palm/two-handed sword alignment AFTER all skeletal deformations!
     this._solveWeaponHandConstraint();
 
-    if (this.ribbon) {
+    if (this.ribbon && this.trailActive && !isDead) {
       const seg = this.getBladeWorldSegment();
-      this.ribbon.pushSample(seg.base, seg.tip, this.trailActive && !isDead);
+      this.ribbon.pushSample(seg.base, seg.tip, true);
     }
   }
 }

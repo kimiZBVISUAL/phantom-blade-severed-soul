@@ -869,8 +869,7 @@ body.is-mobile #mobile-controls:not(.hidden) {
   padding: 6px 12px;
   border-radius: 999px;
   border: 1px solid rgba(216, 173, 92, 0.42);
-  background: rgba(10, 12, 18, 0.72);
-  backdrop-filter: blur(6px);
+  background: rgba(10, 12, 18, 0.82);
   color: var(--gold-bright);
   font-family: var(--font-serif);
   font-size: 12px;
