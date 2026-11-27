@@ -13,8 +13,15 @@ import { PlayerController } from './entities/PlayerController.js';
 import { EnemyActor } from './entities/EnemyActor.js';
 import { CombatManager, PLAYER_MOVES, getArenaFloorHeight } from './combat/CombatSystem.js';
 import { HUDManager } from './ui/HUDManager.js';
+import { MobileControls } from './ui/MobileControls.js';
 import { StoryDirector } from './story/StoryDirector.js';
 import { AAATrailerDirector } from './trailer/AAATrailerDirector.js';
+
+// AAA Anti-Nausea Third-Person Action Camera Constants (Benchmarked: Black Myth: Wukong / Sekiro / Ghost of Tsushima)
+const DEFAULT_CAM_YAW = 0.0;
+const DEFAULT_CAM_PITCH = 0.27; // ~15.5° heroic elevated angle — spacious, horizon-steady, zero vertigo
+const MIN_CAM_PITCH = 0.16;
+const MAX_CAM_PITCH = 0.56;
 
 // 5-Wave Outer Courtyard Wuxia Gauntlet (5 + 6 + 6 + 7 + 8 = 32 NPCs before Boss Xiao Canyang!)
 const COURTYARD_WAVES = [
@@ -85,13 +92,14 @@ const TOTAL_COURTYARD_NPCS = COURTYARD_WAVES.reduce((sum, w) => sum + w.spawns.l
 
 class PhantomBladeGame {
   constructor() {
+    this.isMobileDevice = MobileControls.isLikelyMobile();
     this.canvas = document.getElementById('game-canvas');
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas,
-      antialias: true,
+      antialias: !this.isMobileDevice,
       powerPreference: 'high-performance',
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.isMobileDevice ? 1.5 : 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -100,19 +108,27 @@ class PhantomBladeGame {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x05070d);
-    this.scene.fog = new THREE.FogExp2(0x070a13, 0.022);
+    this.scene.fog = new THREE.FogExp2(0x070a13, 0.021);
 
-    this.camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.15, 160);
+    this.camera = new THREE.PerspectiveCamera(
+      this._computeComfortFOV(),
+      window.innerWidth / window.innerHeight,
+      0.15,
+      160
+    );
     this.camera.position.set(0, 5.5, 29.0);
 
-    // Next-Gen Post-Processing Pipeline (ACES + UnrealBloom)
+    // Next-Gen Post-Processing Pipeline (ACES + UnrealBloom — lighter resolution on mobile for locked 60fps)
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+    const bloomRes = this.isMobileDevice
+      ? new THREE.Vector2(Math.floor(window.innerWidth * 0.5), Math.floor(window.innerHeight * 0.5))
+      : new THREE.Vector2(window.innerWidth, window.innerHeight);
     this.bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.62, // strength
-      0.48, // radius
-      0.72  // threshold
+      bloomRes,
+      this.isMobileDevice ? 0.48 : 0.58, // strength
+      0.46, // radius
+      0.74  // threshold
     );
     this.composer.addPass(this.bloomPass);
     this.composer.addPass(new OutputPass());
@@ -120,6 +136,7 @@ class PhantomBladeGame {
     this.audio = new AudioEngine();
     this.vfx = new VFXSystem(this.scene);
     this.hud = new HUDManager(this.camera);
+    this.mobileControls = new MobileControls({ game: this });
     this.combat = new CombatManager({
       audio: this.audio,
       vfx: this.vfx,
@@ -132,9 +149,17 @@ class PhantomBladeGame {
       onTriggerLightning: () => this.triggerStormLightning(),
     });
 
-    this.camYaw = 0;
-    this.camPitch = 0.34;
+    // AAA Critically-Damped Anti-Nausea Camera State
+    this.camYaw = DEFAULT_CAM_YAW;
+    this.camTargetYaw = DEFAULT_CAM_YAW;
+    this.camPitch = DEFAULT_CAM_PITCH;
+    this.camTargetPitch = DEFAULT_CAM_PITCH;
+    this.camFocus = new THREE.Vector3(0, 1.55, 20.0);
+    this.camGroundY = 0;
+    this.camInitialized = false;
     this.camShake = 0;
+    this.camShakeTime = 0;
+    this.lastManualCamTime = -10;
     this.lightningFlash = 0;
     this.ambientThunderTimer = 9.0;
 
@@ -151,6 +176,41 @@ class PhantomBladeGame {
     window.addEventListener('resize', () => this._onResize());
   }
 
+  _computeComfortFOV() {
+    const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+    if (aspect >= 1.45) return 54;
+    const t = Math.max(0, Math.min(1, (1.45 - aspect) / 0.9));
+    return 54 + t * 14;
+  }
+
+  orbitCameraBy(deltaYaw, deltaPitch) {
+    this.camTargetYaw -= deltaYaw;
+    this.camTargetPitch = Math.max(MIN_CAM_PITCH, Math.min(MAX_CAM_PITCH, this.camTargetPitch + deltaPitch));
+    this.lastManualCamTime = performance.now() * 0.001;
+  }
+
+  recenterCamera() {
+    if (!this.player) return;
+    let desiredYaw = this.player.yaw + Math.PI;
+    const target = (this.bossEncounterStarted && this.boss && !this.boss.dead)
+      ? this.boss
+      : this._findNearestEnemy(14.0);
+    if (target) {
+      desiredYaw = Math.atan2(this.player.pos.x - target.pos.x, this.player.pos.z - target.pos.z);
+    }
+    let diff = desiredYaw - this.camTargetYaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    this.camTargetYaw += diff;
+    this.camTargetPitch = DEFAULT_CAM_PITCH;
+    this.lastManualCamTime = performance.now() * 0.001;
+  }
+
+  addCameraShake(amount) {
+    // Smooth low-frequency micro-impulse, strictly capped to prevent motion sickness
+    this.camShake = Math.min(0.15, Math.max(this.camShake, amount * 0.28));
+  }
+
   _setupLighting() {
     const hemi = new THREE.HemisphereLight(0x3a5582, 0x161012, 0.95);
     this.scene.add(hemi);
@@ -159,7 +219,8 @@ class PhantomBladeGame {
     this.moonLight = new THREE.DirectionalLight(0x88b4ef, 2.45);
     this.moonLight.position.set(16, 28, 18);
     this.moonLight.castShadow = true;
-    this.moonLight.shadow.mapSize.set(2048, 2048);
+    const shadowSize = this.isMobileDevice ? 1024 : 2048;
+    this.moonLight.shadow.mapSize.set(shadowSize, shadowSize);
     this.moonLight.shadow.camera.near = 2;
     this.moonLight.shadow.camera.far = 90;
     const d = 34;
@@ -192,12 +253,26 @@ class PhantomBladeGame {
   _setupCameraMouseOrbit() {
     window.addEventListener('mousemove', (e) => {
       if (!this.gameStarted || this.story.inCutscene || this.gameEnded) return;
-      if (document.pointerLockElement === this.canvas || e.buttons === 1) {
-        this.camYaw -= e.movementX * 0.0026;
-        this.camPitch = Math.max(0.14, Math.min(0.68, this.camPitch + e.movementY * 0.002));
+      // Only orbit when pointer-locked or middle-dragging — NEVER jerk camera on left-click attack!
+      if (document.pointerLockElement === this.canvas || e.buttons === 4) {
+        const dx = Math.max(-55, Math.min(55, e.movementX));
+        const dy = Math.max(-35, Math.min(35, e.movementY));
+        this.orbitCameraBy(dx * 0.0022, dy * 0.0016);
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'KeyV' && this.gameStarted && !this.story.inCutscene && !this.gameEnded) {
+        this.recenterCamera();
+      }
+    });
+    window.addEventListener('mousedown', (e) => {
+      if (e.button === 1 && this.gameStarted && !this.story.inCutscene && !this.gameEnded) {
+        e.preventDefault();
+        this.recenterCamera();
       }
     });
     this.canvas.addEventListener('click', () => {
+      if (this.mobileControls?.enabled) return;
       if (this.gameStarted && !this.story.inCutscene && !this.gameEnded && !document.pointerLockElement) {
         try {
           Promise.resolve(this.canvas.requestPointerLock?.()).catch(() => {});
@@ -208,7 +283,7 @@ class PhantomBladeGame {
 
   triggerStormLightning() {
     this.lightningFlash = 1.0;
-    this.camShake = Math.max(this.camShake, 0.25);
+    this.addCameraShake(0.18);
     this.audio.playSFX('thunder', { volume: 0.82 });
   }
 
@@ -442,7 +517,8 @@ class PhantomBladeGame {
       this.combat.stats.damageDealt += actualDmg;
       this.combat.addCombo(move.name || '疾风快刀');
       this.combat.triggerHitstop(move.hitstop);
-      this.camShake = Math.max(this.camShake, move.shake);
+      this.addCameraShake(move.shake);
+      this.mobileControls?.vibrate(isCrit ? 18 : 10);
 
       if (move.shayiGain) this.player.addShayi(move.shayiGain);
       if (move.shockwave) this.vfx.spawnShockwave(enemy.pos, { color: 0xff8c3b, maxRadius: 4.0 });
@@ -474,7 +550,8 @@ class PhantomBladeGame {
       this.combat.stats.parries++;
       this.combat.addCombo('精防振刀 · 可追斩');
       this.combat.triggerHitstop(0.135, 0.32);
-      this.camShake = Math.max(this.camShake, 0.52);
+      this.addCameraShake(0.45);
+      this.mobileControls?.vibrate(25);
 
       this.player.parryTimer = 0;
       this.player.riposteTimer = 0.95; // Unlocks instant Empowered Counter-Riposte on next Left Click / J!
@@ -498,7 +575,8 @@ class PhantomBladeGame {
       this.player.hp = Math.max(1, this.player.hp - Math.round(move.dmg * 0.18));
       this.audio.playSFX('guard_block', { volume: 0.88, worldPos: clashPoint });
       this.vfx.spawnSparks(clashPoint, 32, 0xffb366, 0.9);
-      this.camShake = Math.max(this.camShake, 0.22);
+      this.addCameraShake(0.18);
+      this.mobileControls?.vibrate(14);
       this.hud.updatePlayer(this.player);
       return true;
     }
@@ -512,7 +590,8 @@ class PhantomBladeGame {
       this.player.staggerTimer = 0.26;
     }
     this.combat.triggerHitstop(0.055);
-    this.camShake = Math.max(this.camShake, 0.38);
+    this.addCameraShake(0.32);
+    this.mobileControls?.vibrate(20);
     this.audio.playSFX('hit_heavy', { volume: 0.95 });
     this.audio.playSFX('vox_hun_hurt', { volume: 0.92, pitchJitter: 0.05 });
     this.vfx.spawnBloodAndInk(this.player.pos.clone().add(new THREE.Vector3(0, 1.3, 0)), diff.normalize(), 18);
@@ -682,7 +761,12 @@ class PhantomBladeGame {
     this.boss.active = true;
     this.audio.playBGM('bgm_boss', 1.0);
     await this.story.playBossIntroCutscene(this.player, this.boss);
-    this.hud.setObjective('叁 · 宿命死斗', '击败血衣堂主 · 萧残阳（善用右键振刀与技能链破势）');
+    this.camYaw = DEFAULT_CAM_YAW;
+    this.camTargetYaw = DEFAULT_CAM_YAW;
+    this.camPitch = DEFAULT_CAM_PITCH;
+    this.camTargetPitch = DEFAULT_CAM_PITCH;
+    this.camInitialized = false;
+    this.hud.setObjective('叁 · 宿命死斗', '击败血衣堂主 · 萧残阳（善用弹反振刀与技能链破势）');
     this.hud.updateBoss(this.boss);
   }
 
@@ -698,11 +782,19 @@ class PhantomBladeGame {
       this.player.pos.set(0, 0, 12.8);
       this.player.yaw = Math.PI;
       this.player.rig.root.rotation.y = Math.PI;
-      this.camYaw = 0.25;
-      this.camPitch = 0.26;
+      this.camYaw = DEFAULT_CAM_YAW;
+      this.camTargetYaw = DEFAULT_CAM_YAW;
+      this.camPitch = DEFAULT_CAM_PITCH;
+      this.camTargetPitch = DEFAULT_CAM_PITCH;
+      this.camInitialized = false;
       for (const a of this.assassins) a.active = true;
     } else {
       await this.story.playIntroCutscene(this.player, this.assassins);
+      this.camYaw = DEFAULT_CAM_YAW;
+      this.camTargetYaw = DEFAULT_CAM_YAW;
+      this.camPitch = DEFAULT_CAM_PITCH;
+      this.camTargetPitch = DEFAULT_CAM_PITCH;
+      this.camInitialized = false;
     }
   }
 
@@ -751,8 +843,8 @@ class PhantomBladeGame {
 
     // Dynamic cinematic orbit during promo showcase
     const orbitTimer = setInterval(() => {
-      this.camYaw += 0.018;
-      this.camPitch = 0.24 + Math.sin(performance.now() * 0.0012) * 0.06;
+      this.camTargetYaw += 0.018;
+      this.camTargetPitch = 0.24 + Math.sin(performance.now() * 0.0012) * 0.06;
     }, 33);
 
     try {
@@ -836,36 +928,111 @@ class PhantomBladeGame {
   }
 
   _updateActionCamera(rawDt) {
-    if (this.story.updateCamera(rawDt, this.camera)) return;
+    if (this.story.updateCamera(rawDt, this.camera)) {
+      this.camInitialized = false;
+      return;
+    }
     if (!this.player) return;
 
-    // Subtle combat framing assist toward Boss when in Boss Hall
-    const focus = this.player.pos.clone().add(new THREE.Vector3(0, 1.55, 0));
-    if (this.bossEncounterStarted && this.boss && !this.boss.dead) {
-      focus.lerp(this.boss.pos.clone().add(new THREE.Vector3(0, 1.65, 0)), 0.22);
+    // 1. Critically-damped yaw/pitch smoothing (eliminates mouse/touch micro-stutter)
+    const rotAlpha = 1 - Math.exp(-15.0 * rawDt);
+    this.camYaw += (this.camTargetYaw - this.camYaw) * rotAlpha;
+    this.camPitch += (this.camTargetPitch - this.camPitch) * rotAlpha;
+
+    // 2. Decoupled grounded vertical tracking: hero leaps dramatically while horizon stays rock-steady!
+    const floorY = getArenaFloorHeight(this.player.pos.x, this.player.pos.z);
+    const jumpDelta = Math.max(0, this.player.pos.y - floorY);
+    const targetGroundY = floorY + jumpDelta * 0.22;
+    if (!this.camInitialized) {
+      this.camGroundY = targetGroundY;
+    } else {
+      this.camGroundY += (targetGroundY - this.camGroundY) * (1 - Math.exp(-5.2 * rawDt));
     }
 
-    const dist = 6.35;
-    const horiz = Math.cos(this.camPitch) * dist;
-    const vert = Math.sin(this.camPitch) * dist + 0.65;
-    const desiredCam = new THREE.Vector3(
-      this.player.pos.x + Math.sin(this.camYaw) * horiz,
-      this.player.pos.y + vert,
-      this.player.pos.z + Math.cos(this.camYaw) * horiz
+    // 3. AAA Over-The-Right-Shoulder Framing (Black Myth: Wukong / Sekiro / Ghost of Tsushima)
+    const rightX = Math.cos(this.camYaw);
+    const rightZ = -Math.sin(this.camYaw);
+    const shoulderOffset = 0.38;
+
+    const desiredFocus = new THREE.Vector3(
+      this.player.pos.x + rightX * shoulderOffset,
+      this.camGroundY + 1.52,
+      this.player.pos.z + rightZ * shoulderOffset
     );
-    desiredCam.y = Math.max(desiredCam.y, getArenaFloorHeight(desiredCam.x, desiredCam.z) + 0.65);
 
-    this.camera.position.lerp(desiredCam, Math.min(1, rawDt * 14));
-    if (this.camShake > 0.005) {
-      this.camera.position.x += (Math.random() - 0.5) * this.camShake;
-      this.camera.position.y += (Math.random() - 0.5) * this.camShake * 0.8;
-      this.camShake *= Math.pow(0.04, rawDt);
+    // Subtle, non-jarring combat framing assist toward Boss or nearest engaged foe
+    if (this.bossEncounterStarted && this.boss && !this.boss.dead) {
+      desiredFocus.lerp(
+        new THREE.Vector3(this.boss.pos.x, this.boss.pos.y + 1.65, this.boss.pos.z),
+        0.18
+      );
+    } else {
+      const nearEnemy = this._findNearestEnemy(8.5);
+      if (nearEnemy) {
+        desiredFocus.lerp(
+          new THREE.Vector3(nearEnemy.pos.x, nearEnemy.pos.y + 1.45, nearEnemy.pos.z),
+          0.10
+        );
+      }
     }
-    this.camera.lookAt(focus);
+
+    // Spacious AAA camera distance (extra breathing room on mobile screens)
+    const dist = this.mobileControls?.enabled ? 8.05 : 7.45;
+    const horiz = Math.cos(this.camPitch) * dist;
+    const vert = Math.sin(this.camPitch) * dist + 0.58;
+    const desiredCam = new THREE.Vector3(
+      this.player.pos.x + rightX * shoulderOffset + Math.sin(this.camYaw) * horiz,
+      this.camGroundY + vert,
+      this.player.pos.z + rightZ * shoulderOffset + Math.cos(this.camYaw) * horiz
+    );
+    desiredCam.y = Math.max(desiredCam.y, getArenaFloorHeight(desiredCam.x, desiredCam.z) + 0.85);
+
+    if (!this.camInitialized) {
+      this.camFocus.copy(desiredFocus);
+      this.camera.position.copy(desiredCam);
+      this.camInitialized = true;
+    } else {
+      // Smooth exponential damping on BOTH focus and camera position (zero whip-pan during dashes!)
+      this.camFocus.lerp(desiredFocus, 1 - Math.exp(-10.5 * rawDt));
+      this.camera.position.lerp(desiredCam, 1 - Math.exp(-8.5 * rawDt));
+    }
+
+    // 4. Anti-Nausea Smooth Directional Micro-Impulse (applied equally to pos & focus -> ZERO angular jitter!)
+    let shakeX = 0;
+    let shakeY = 0;
+    if (this.camShake > 0.002) {
+      this.camShakeTime += rawDt;
+      shakeX = Math.sin(this.camShakeTime * 34.0) * this.camShake * 0.65;
+      shakeY = Math.cos(this.camShakeTime * 27.0) * this.camShake * 0.55;
+      this.camShake *= Math.exp(-11.0 * rawDt);
+    } else {
+      this.camShake = 0;
+    }
+
+    // Subtle smooth FOV breathing on dash (+2.5° max, anti-nausea)
+    const targetFov = this._computeComfortFOV() + (this.player.dashTimer > 0 ? 2.5 : 0);
+    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+      this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-8.0 * rawDt));
+      this.camera.updateProjectionMatrix();
+    }
+
+    const finalLook = this.camFocus.clone();
+    finalLook.x += rightX * shakeX;
+    finalLook.y += shakeY;
+    finalLook.z += rightZ * shakeX;
+
+    this.camera.position.x += rightX * shakeX;
+    this.camera.position.y += shakeY;
+    this.camera.position.z += rightZ * shakeX;
+    this.camera.lookAt(finalLook);
+    this.camera.position.x -= rightX * shakeX;
+    this.camera.position.y -= shakeY;
+    this.camera.position.z -= rightZ * shakeX;
   }
 
   _onResize() {
     this.camera.aspect = window.innerWidth / window.innerHeight;
+    this.camera.fov = this._computeComfortFOV();
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.composer.setSize(window.innerWidth, window.innerHeight);
@@ -894,9 +1061,9 @@ class PhantomBladeGame {
       }
 
       if (!this.gameStarted) {
-        // Atmospheric revolving preview camera around the rainy Mountain Gate on Title Screen!
-        const ang = now * 0.14;
-        this.camera.position.set(Math.sin(ang) * 9.5, 4.2, 27.5 + Math.cos(ang) * 3.2);
+        // Serene revolving preview camera around the rainy Mountain Gate on Title Screen
+        const ang = now * 0.08;
+        this.camera.position.set(Math.sin(ang) * 9.5, 4.4, 27.5 + Math.cos(ang) * 3.0);
         this.camera.lookAt(0, 2.6, 16.0);
         this.vfx.update(rawDt, new THREE.Vector3(0, 0, 18));
         this.composer.render();
@@ -970,6 +1137,7 @@ class PhantomBladeGame {
       // Check if an execution-ready enemy is within range to display `[F] 破绽绝杀`
       const canExec = controlsOn && !!this._findNearestEnemy(5.5, true);
       this.hud.setExecutionPromptVisible(canExec);
+      this.mobileControls?.syncState(this.player, { canExec, controlsOn });
       this.hud.updateWorldMarkers(this.assassins);
       this.hud.updateBoss(this.boss);
       this._updateActionCamera(rawDt);

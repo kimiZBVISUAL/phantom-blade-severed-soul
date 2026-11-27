@@ -51,7 +51,24 @@ export class PlayerController {
     this.hurtVoCooldown = 0;
 
     this.keys = {};
+    this.virtualMove = { x: 0, z: 0 };
+    this.attackHolding = false;
     this._bindInputs();
+  }
+
+  setVirtualMove(x, z) {
+    const len = Math.hypot(x, z);
+    if (len > 1) {
+      this.virtualMove.x = x / len;
+      this.virtualMove.z = z / len;
+    } else {
+      this.virtualMove.x = x;
+      this.virtualMove.z = z;
+    }
+  }
+
+  stopGuard() {
+    this.guardHolding = false;
   }
 
   _bindInputs() {
@@ -74,7 +91,7 @@ export class PlayerController {
     });
 
     window.addEventListener('mousedown', (e) => {
-      if (e.target.tagName === 'BUTTON') return;
+      if (e.target.closest?.('button, #mobile-controls, #execution-prompt, #portrait-hint')) return;
       if (e.button === 0) this.queueAttack('basic');
       if (e.button === 2) this.startParry();
     });
@@ -248,13 +265,19 @@ export class PlayerController {
   }
 
   _getDesiredMoveDir() {
-    let ix = 0, iz = 0;
+    let ix = this.virtualMove.x;
+    let iz = this.virtualMove.z;
     if (this.keys.KeyW || this.keys.ArrowUp) iz -= 1;
     if (this.keys.KeyS || this.keys.ArrowDown) iz += 1;
     if (this.keys.KeyA || this.keys.ArrowLeft) ix -= 1;
     if (this.keys.KeyD || this.keys.ArrowRight) ix += 1;
+    const len = Math.hypot(ix, iz);
+    if (len > 1) {
+      ix /= len;
+      iz /= len;
+    }
     const v = new THREE.Vector3(ix, 0, iz);
-    if (v.lengthSq() > 0 && this.cameraYaw !== undefined) {
+    if (v.lengthSq() > 0.0001 && this.cameraYaw !== undefined) {
       v.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.cameraYaw);
     }
     return v;
@@ -326,6 +349,9 @@ export class PlayerController {
 
         // Seamless Figure-8 Combo Chaining at Zanshin Cancel Window!
         const cancelPoint = m.cancelAt || 0.58;
+        if (!this.bufferedAction && this.attackHolding && poseProgress >= cancelPoint - 0.05) {
+          this.bufferedAction = 'basic';
+        }
         if (this.bufferedAction && poseProgress >= cancelPoint) {
           const next = this.bufferedAction;
           this.bufferedAction = null;
@@ -338,18 +364,26 @@ export class PlayerController {
             const next = this.bufferedAction;
             this.bufferedAction = null;
             this._executeQueued(next);
+          } else if (this.attackHolding) {
+            this._executeQueued('basic');
           }
         }
       } else if (this.staggerTimer > 0) {
         combatPose = 'stagger';
         poseProgress = 1 - this.staggerTimer / 0.28;
       } else {
+        if (this.attackHolding) {
+          this._executeQueued('basic');
+        }
         const dir = this._getDesiredMoveDir();
-        if (dir.lengthSq() > 0.01) {
-          dir.normalize();
-          const maxSpd = this.guardHolding ? 3.8 : 7.8;
-          this.pos.addScaledVector(dir, maxSpd * dt);
-          const targetYaw = Math.atan2(dir.x, dir.z);
+        const mag = dir.length();
+        if (mag > 0.08 && !this.currentMove) {
+          const normDir = dir.clone().divideScalar(mag);
+          // Smooth analog speed curve: slight thumb tilt = poised walk, full tilt = full sprint
+          const analogScale = mag >= 0.85 ? 1.0 : 0.38 + (mag / 0.85) * 0.62;
+          const maxSpd = (this.guardHolding ? 3.8 : 7.8) * analogScale;
+          this.pos.addScaledVector(normDir, maxSpd * dt);
+          const targetYaw = Math.atan2(normDir.x, normDir.z);
           let diff = targetYaw - this.yaw;
           while (diff > Math.PI) diff -= Math.PI * 2;
           while (diff < -Math.PI) diff += Math.PI * 2;

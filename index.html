@@ -2,7 +2,11 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#07080b" />
   <title>影之刃：断魂局 | PHANTOM BLADE: SEVERED SOUL (3A Dark Wuxia Demo)</title>
   <link rel="stylesheet" href="/src/styles/ui.css" />
 </head>
@@ -29,7 +33,7 @@
         <h1 class="main-title">影之刃<span>：</span>断魂局</h1>
         <p class="tagline">雨夜古刹 · 杀意技能链 · 极速弹反破招 · 全程电影级中文配音</p>
 
-        <div class="controls-showcase">
+        <div class="controls-showcase desktop-controls-hint">
           <div class="ctrl-item"><kbd>W A S D</kbd><span>疾行 / 走位</span></div>
           <div class="ctrl-item"><kbd>鼠标左键 / J</kbd><span>快刀四连斩</span></div>
           <div class="ctrl-item"><kbd>鼠标右键 / K</kbd><span>精防弹反（拼刀振刀）</span></div>
@@ -37,7 +41,14 @@
           <div class="ctrl-item"><kbd>E / 1</kbd><span>技能链·上《影杀三绝》</span></div>
           <div class="ctrl-item"><kbd>Q / 2</kbd><span>技能链·下《赤霄破阵》</span></div>
           <div class="ctrl-item"><kbd>F</kbd><span>破绽处决《鬼哭·一闪》</span></div>
-          <div class="ctrl-item"><kbd>R</kbd><span>饮血回春（葫芦×3）</span></div>
+          <div class="ctrl-item"><kbd>R / V</kbd><span>饮血葫芦 / 镜头回正</span></div>
+        </div>
+
+        <div class="controls-showcase mobile-controls-hint">
+          <div class="ctrl-item"><kbd>左手摇杆</kbd><span>360° 轻推漫步 · 满推疾行</span></div>
+          <div class="ctrl-item"><kbd>右屏滑动</kbd><span>丝滑转视角 · 双击回正</span></div>
+          <div class="ctrl-item"><kbd>斩 / 长按</kbd><span>快刀四连 · 振刀后追魂斩</span></div>
+          <div class="ctrl-item"><kbd>弹反 / 闪避</kbd><span>轻触振刀 · 长按格挡 · 鬼步</span></div>
         </div>
 
         <button id="btn-start-game" class="wuxia-btn" disabled>
@@ -212,6 +223,57 @@
         <button id="btn-restart" class="wuxia-btn">再入残局</button>
       </div>
     </div>
+
+    <!-- Top-Tier Mobile Touch Controls (Floating Joystick + Camera Drag + Golden Arc Action Wheel) -->
+    <div id="mobile-controls" class="hidden" aria-label="移动端虚拟操控">
+      <div id="mobile-camera-zone"></div>
+
+      <div id="mobile-top-tools">
+        <button id="mbtn-recenter" class="mtool-pill" type="button">回正</button>
+        <button id="mbtn-fullscreen" class="mtool-pill" type="button">全屏</button>
+      </div>
+
+      <div id="mobile-joystick-zone">
+        <div id="joystick-base">
+          <div id="joystick-arc"></div>
+          <div id="joystick-knob"></div>
+        </div>
+      </div>
+
+      <div id="mobile-action-wheel">
+        <button id="mbtn-exec" class="mbtn mbtn-exec hidden" type="button">
+          <span class="mbtn-label">绝杀</span>
+          <span class="mbtn-sub">破绽</span>
+        </button>
+        <button id="mbtn-lower" class="mbtn mbtn-skill-lower" type="button">
+          <span class="mbtn-label">裂地</span>
+          <span class="mbtn-sub">1/3</span>
+        </button>
+        <button id="mbtn-upper" class="mbtn mbtn-skill-upper" type="button">
+          <span class="mbtn-label">踏影</span>
+          <span class="mbtn-sub">1/3</span>
+        </button>
+        <button id="mbtn-gourd" class="mbtn mbtn-gourd" type="button">
+          <span class="mbtn-label">葫芦</span>
+          <span class="mbtn-sub">×3</span>
+        </button>
+        <button id="mbtn-parry" class="mbtn mbtn-parry" type="button">
+          <span class="mbtn-label">弹反</span>
+          <span class="mbtn-sub">按住防</span>
+        </button>
+        <button id="mbtn-dash" class="mbtn mbtn-dash" type="button">
+          <span class="mbtn-label">闪避</span>
+          <span class="mbtn-sub">鬼步</span>
+        </button>
+        <button id="mbtn-attack" class="mbtn mbtn-attack" type="button">
+          <span class="mbtn-label">斩</span>
+          <span class="mbtn-sub">长按连招</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Non-blocking Portrait Orientation Suggestion -->
+    <div id="portrait-hint" class="hidden">横屏视野更宽广舒适 · 轻触关闭</div>
 
     <!-- Floating World-Space Enemy Health/Posture Container -->
     <div id="world-markers"></div>
