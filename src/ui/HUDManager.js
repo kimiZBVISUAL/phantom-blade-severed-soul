@@ -40,6 +40,7 @@ export class HUDManager {
       this.combatHud.classList.add('hidden');
       if (onSkip) {
         this.skipBtn.classList.remove('hidden');
+        this.skipBtn.textContent = document.body.classList.contains('is-mobile') ? '跳过演出' : '[Tab] 跳过演出';
         this.skipBtn.onclick = onSkip;
       } else {
         this.skipBtn.classList.add('hidden');
