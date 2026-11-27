@@ -1,0 +1,9 @@
+node_modules/
+dist/
+blender_pipeline/
+blender_sources/
+public/
+*.mp4
+*.webm
+.DS_Store
+.wrangler/
